@@ -117,7 +117,11 @@ get_dataset_summary <- function(file_path, sheet = 1, max_unique_cat = 10) {
     numeric_data <- numeric_data[, colSums(is.na(numeric_data)) < nrow(numeric_data), drop = FALSE]
 
     if (ncol(numeric_data) > 1) {
-      cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+      raw_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+      cor_matrix <- list(
+        columns = colnames(raw_matrix),
+        matrix = unname(as.matrix(raw_matrix))
+      )
     }
   }
 

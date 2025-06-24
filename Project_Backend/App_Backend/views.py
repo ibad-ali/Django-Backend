@@ -1,6 +1,8 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser
+from django.http import HttpResponse
+from io import BytesIO
 import tempfile
 import os
 import subprocess
@@ -368,6 +370,130 @@ class HandleOutliersView(APIView):
                 "correlation_matrix": r_output.get("correlation_matrix"),
                 "filtered_data": sub_df_json
             })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class RemoveDuplicatedView(APIView):
+    def post(self, request):
+        summary_data = request.data.get("summaryData")
+
+        if not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            # remove duplicates
+            df = df.drop_duplicates()
+
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class HandleInconsistenciesView(APIView):
+    def post(self, request):
+        inconsistencies_checks = request.data.get("inconsistencies")
+        summary_data = request.data.get("summaryData")
+
+        if not summary_data or not inconsistencies_checks:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            # Apply inconsistency handling
+            if inconsistencies_checks.get('strip'):
+                df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+            if inconsistencies_checks.get('case'):
+                df = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class DownloadOutputView(APIView):
+    def post(self, request):
+        summary_data = request.data.get("summaryData")
+
+        if not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            if not preview_data:
+                return Response({"error": "No data available to download."}, status=400)
+
+            df = pd.DataFrame(preview_data)
+
+            # Create in-memory Excel file
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Sheet1')
+            output.seek(0)
+
+            filename = f"output-data-file.xlsx"
+            response = HttpResponse(
+                output,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+            return response
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
