@@ -7,4 +7,14 @@ urlpatterns = [
     path('handle-missing/', HandleMissingValuesView.as_view(), name='handle-missing'),
     path('handle-outliers/', HandleOutliersView.as_view(), name='handle-outliers'),
     path('detect-outliers/', DetectOutliersView.as_view(), name='detect-outliers'),
+    path('remove-duplicates/', RemoveDuplicatedView.as_view(), name='remove-duplicates'),
+    path('handle-inconsistencies/', HandleInconsistenciesView.as_view(), name='handle-inconsistencies'),
+    path('download-output/', DownloadOutputView.as_view(), name='download-output'),
+    path('normalize-column/', NormalizeDataView.as_view(), name = 'normalize-column'),
+    path('encoding/', EncodingView.as_view(), name = 'encoding'),
+    path('skewness/', SkewnessView.as_view(), name = 'skewness'),
+    path('aggregate/', AggregationView.as_view(), name = 'aggregate'),
+    path('variable-construction/', VariableConstruction.as_view(), name='variable-construction'),
 ]
+
+
