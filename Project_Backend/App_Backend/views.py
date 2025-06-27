@@ -10,6 +10,8 @@ import pandas as pd
 import json
 import numpy as np
 import math
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from sklearn.linear_model import LinearRegression
 from scipy.stats import zscore
 
 def parse_column_list(value):
@@ -206,8 +208,173 @@ class HandleMissingValuesView(APIView):
             elif missing_method == "remove_col":
                 df.drop(columns=[selected_column], inplace=True)
 
+            elif missing_method == "regression":
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    return Response({"error": "Regression imputation requires a numeric column."}, status=400)
+
+                # Get numeric columns for features (excluding target column)
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                if selected_column in numeric_cols:
+                    numeric_cols.remove(selected_column)
+
+                if not numeric_cols:
+                    return Response({"error": "No numeric features available for regression imputation."}, status=400)
+
+                # Split data into missing and non-missing
+                missing_mask = df[selected_column].isna()
+                train_df = df[~missing_mask]
+                predict_df = df[missing_mask]
+
+                if len(train_df) < 2:
+                    return Response({"error": "Not enough non-missing values to perform regression."}, status=400)
+
+                # Handle NaN in feature columns - option 1: drop rows with NaN in features
+                train_df = train_df.dropna(subset=numeric_cols)
+                if len(train_df) < 2:
+                    return Response({
+                                        "error": "Not enough complete cases to perform regression after dropping rows with missing features."},
+                                    status=400)
+
+                # Train linear regression model
+                from sklearn.linear_model import LinearRegression
+                from sklearn.impute import SimpleImputer
+                from sklearn.pipeline import make_pipeline
+
+                # Create pipeline with imputer and model
+                model = make_pipeline(
+                    SimpleImputer(strategy='mean'),  # Impute missing features with mean
+                    LinearRegression()
+                )
+
+                model.fit(train_df[numeric_cols], train_df[selected_column])
+
+                # Predict missing values (only for rows where features aren't all NaN)
+                predict_df = predict_df.dropna(subset=numeric_cols)
+                if not predict_df.empty:
+                    predicted_values = model.predict(predict_df[numeric_cols])
+                    df.loc[predict_df.index, selected_column] = predicted_values
+
+            elif missing_method == "decision_tree":
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    return Response({"error": "Decision tree imputation requires a numeric column."}, status=400)
+
+                # Get numeric columns for features (excluding target column)
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                if selected_column in numeric_cols:
+                    numeric_cols.remove(selected_column)
+
+                if not numeric_cols:
+                    return Response({"error": "No numeric features available for decision tree imputation."},
+                                    status=400)
+
+                # Split data into missing and non-missing
+                missing_mask = df[selected_column].isna()
+                train_df = df[~missing_mask]
+                predict_df = df[missing_mask]
+
+                if len(train_df) < 2:
+                    return Response({"error": "Not enough non-missing values to perform decision tree imputation."},
+                                    status=400)
+
+                # Handle NaN in feature columns - option 2: use HistGradientBoostingRegressor which handles NaN natively
+                from sklearn.ensemble import HistGradientBoostingRegressor
+
+                # Drop rows where all features are NaN
+                train_df = train_df.dropna(subset=numeric_cols, how='all')
+                if len(train_df) < 2:
+                    return Response({"error": "Not enough complete cases to perform decision tree imputation."},
+                                    status=400)
+
+                model = HistGradientBoostingRegressor(random_state=42)
+                model.fit(train_df[numeric_cols], train_df[selected_column])
+
+                # Predict missing values (only for rows that have at least some features)
+                predict_df = predict_df.dropna(subset=numeric_cols, how='all')
+                if not predict_df.empty:
+                    predicted_values = model.predict(predict_df[numeric_cols])
+                    df.loc[predict_df.index, selected_column] = predicted_values
+
             else:
                 return Response({"error": f"Invalid missing method '{missing_method}'"}, status=400)
+
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class HandleSmoothingView(APIView):
+    def post(self, request):
+        selected_column = request.data.get("selectedSmoothingColumn")
+        smoothing_method = request.data.get("smoothingMethod")
+        summary_data = request.data.get("summaryData")
+        regression_type = request.data.get("regressionType", "loess")
+        bin_size = int(request.data.get("binSize", 5))
+
+        if not selected_column or not smoothing_method or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+            # Convert to numeric and handle NaNs
+            df[selected_column] = pd.to_numeric(df[selected_column], errors='coerce')
+            x = np.arange(len(df))
+            y = df[selected_column].values.copy()
+
+            if smoothing_method == "binning":
+                smoothed = y.copy()
+                n = len(y)
+                for i in range(0, n, bin_size):
+                    idx = slice(i, min(i + bin_size, n))
+                    bin_mean = np.nanmean(y[idx])
+                    smoothed[idx] = bin_mean
+                df[selected_column] = smoothed
+
+            elif smoothing_method == "regression":
+                mask = ~np.isnan(y)
+                x_masked = x[mask].reshape(-1, 1)
+                y_masked = y[mask]
+
+                if regression_type == "loess":
+                    loess_result = lowess(y_masked, x[mask], frac=0.3, return_sorted=False)
+                    smoothed = np.full_like(y, fill_value=np.nan)
+                    smoothed[mask] = loess_result
+                    df[selected_column] = smoothed
+
+                elif regression_type == "linear":
+                    model = LinearRegression()
+                    model.fit(x_masked, y_masked)
+                    df[selected_column] = model.predict(x.reshape(-1, 1))
+
+                else:
+                    return Response({"error": "Unsupported regression type. Choose 'loess' or 'linear'."}, status=400)
+
+            else:
+                return Response({"error": f"Invalid missing method '{smoothing_method}'"}, status=400)
 
             # Update filtered data
             sub_df_json = df.to_dict(orient='list')
@@ -494,6 +661,523 @@ class DownloadOutputView(APIView):
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
             return response
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+class NormalizeDataView(APIView):
+    def post(self, request):
+        selected_column = request.data.get("selectedColumn")
+        normalization_method = request.data.get("normalizationMethod")
+        summary_data = request.data.get("summaryData")
+
+        if not selected_column or not normalization_method or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            if selected_column not in df.columns:
+                return Response({"error": f"Column '{selected_column}' not found in data."}, status=400)
+
+            # Save DataFrame to CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            # Prepare output path for normalization
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                normalized_output_path = temp_output.name
+
+            # R Script call for normalization
+            r_script_path = "R Functions/Transformation/normalize_column.R"
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                selected_column,
+                normalization_method,
+                normalized_output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(f"R Script Error during normalization: {result.stderr}")
+
+            with open(normalized_output_path, "r") as f:
+                normalized_data = json.load(f)
+
+            # Save the normalized DataFrame to a new temporary CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_normalized_file:
+                normalized_df = pd.DataFrame(normalized_data)
+                normalized_df.to_csv(temp_normalized_file.name, index=False)
+                normalized_csv_path = temp_normalized_file.name
+
+            # Call R script to generate summary based on normalized data
+            summary_r_script_path = "R Functions/get_dataset_summary.R"
+            summary_cmd = ["Rscript", summary_r_script_path, normalized_csv_path]
+            summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": normalized_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+class EncodingView(APIView):
+    def post(self, request):
+        selected_column = request.data.get("selectedColumn")
+        encoding_method = request.data.get("encodingMethod")
+        summary_data = request.data.get("summaryData")
+
+        if not selected_column or not encoding_method or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            if selected_column not in df.columns:
+                return Response({"error": f"Column '{selected_column}' not found in data."}, status=400)
+
+            # Save DataFrame to CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            # Prepare output path for Encoding
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                encoding_output_path = temp_output.name
+
+            # R Script call for Encoding
+            r_script_path = "R Functions/Transformation/encoding.R"
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                selected_column,
+                encoding_method,
+                encoding_output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(f"R Script Error during Encoding: {result.stderr}")
+
+            with open(encoding_output_path, "r") as f:
+                encoded_data = json.load(f)
+
+            # Save the encoded DataFrame to a new temporary CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_encoded_file:
+                encoded_df = pd.DataFrame(encoded_data)
+                encoded_df.to_csv(temp_encoded_file.name, index=False)
+                encoded_csv_path = temp_encoded_file.name
+
+            # Call R script to generate summary based on encoded data
+            summary_r_script_path = "R Functions/get_dataset_summary.R"
+            summary_cmd = ["Rscript", summary_r_script_path, encoded_csv_path]
+            summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": encoded_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+class SkewnessView(APIView):
+    def post(self, request):
+        selected_column = request.data.get("selectedColumn")
+        skewness_method = request.data.get("skewnessMethod")
+        summary_data = request.data.get("summaryData")
+
+        if not selected_column or not skewness_method or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            if selected_column not in df.columns:
+                return Response({"error": f"Column '{selected_column}' not found in data."}, status=400)
+
+            # Save DataFrame to CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            # Prepare output path for Skewness
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                skewness_output_path = temp_output.name
+
+            # R Script call for Skewness
+            r_script_path = "R Functions/Transformation/skewness.R"
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                selected_column,
+                skewness_method,
+                skewness_output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(f"R Script Error during Skewness: {result.stderr}")
+
+            with open(skewness_output_path, "r") as f:
+                skewed_data = json.load(f)
+
+            # Save the skewed_data DataFrame to a new temporary CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_skewed_file:
+                skewed_df = pd.DataFrame(skewed_data)
+                skewed_df.to_csv(temp_skewed_file.name, index=False)
+                skewed_csv_path = temp_skewed_file.name
+
+            # Call R script to generate summary based on skewed data
+            summary_r_script_path = "R Functions/get_dataset_summary.R"
+            summary_cmd = ["Rscript", summary_r_script_path, skewed_csv_path]
+            summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": skewed_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+class AggregationView(APIView):
+    def post(self, request):
+        group_vars = request.data.get("groupVars")
+        agg_var = request.data.get("aggVar")
+        agg_func = request.data.get("aggFunc")
+        summary_data = request.data.get("summaryData")
+
+        if not group_vars or not agg_func or not summary_data or (agg_func != "count" and not agg_var):
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            # Validate group_vars and agg_var columns
+            group_vars_list = group_vars.split(",")
+            for var in group_vars_list:
+                if var not in df.columns:
+                    return Response({"error": f"Group column '{var}' not found in data."}, status=400)
+
+            if agg_func != "count" and agg_var not in df.columns:
+                return Response({"error": f"Aggregation column '{agg_var}' not found in data."}, status=400)
+
+            # Save DataFrame to CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            # Prepare output path for Aggregation
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                aggregation_output_path = temp_output.name
+
+            # R Script call for Aggregation
+            r_script_path = "R Functions/Transformation/aggregation.R"
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                group_vars,
+                agg_var if agg_func != "count" else "",
+                agg_func,
+                aggregation_output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(f"R Script Error during Aggregation: {result.stderr}")
+
+            with open(aggregation_output_path, "r") as f:
+                aggregated_data = json.load(f)
+
+            # Save the aggregated DataFrame to a new temporary CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_aggregated_file:
+                aggregated_df = pd.DataFrame(aggregated_data)
+                aggregated_df.to_csv(temp_aggregated_file.name, index=False)
+                aggregated_csv_path = temp_aggregated_file.name
+
+            # Call R script to generate summary based on aggregated data
+            summary_r_script_path = "R Functions/get_dataset_summary.R"
+            summary_cmd = ["Rscript", summary_r_script_path, aggregated_csv_path]
+            summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": aggregated_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
+class VariableConstructionView(APIView):
+    def post(self, request):
+        summary_data = request.data.get("summaryData")
+
+        if not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class HandleDiscretizationView(APIView):
+    def post(self, request):
+        selected_column = request.data.get("selectedDiscretizedColumn")
+        discretization_method = request.data.get("discretizationMethod")
+        summary_data = request.data.get("summaryData")
+
+        if not selected_column or not discretization_method or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            if selected_column not in df.columns:
+                return Response({"error": f"Column '{selected_column}' not found in data."}, status=400)
+
+            # Save DataFrame to CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            # Prepare output path for discretization
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                discretization_output_path = temp_output.name
+
+            # R Script call for discretization
+            r_script_path = "R Functions/Reduction/discretization.R"
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                selected_column,
+                discretization_method,
+                discretization_output_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(f"R Script Error during discretization: {result.stderr}")
+
+            with open(discretization_output_path, "r") as f:
+                discretized_data = json.load(f)
+
+            # Save the discretized DataFrame to a new temporary CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_discretized_file:
+                discretized_df = pd.DataFrame(discretized_data)
+                discretized_df.to_csv(temp_discretized_file.name, index=False)
+                discretized_df_csv_path = temp_discretized_file.name
+
+            # Call R script to generate summary based on discretized data
+            summary_r_script_path = "R Functions/get_dataset_summary.R"
+            summary_cmd = ["Rscript", summary_r_script_path, discretized_df_csv_path]
+            summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": discretized_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class HandleMulticollinearityView(APIView):
+    def post(self, request):
+        threshold = request.data.get("threshold")
+        method = request.data.get("method")
+        prefer = request.data.get("prefer", "first")
+        summary_data = request.data.get("summaryData")
+
+        # Validate inputs
+        if not threshold or not method or not prefer or not summary_data:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            df = pd.DataFrame(summary_data.get("filtered_data", []))
+
+            if method not in ["pearson", "spearman", "kendall"]:
+                return Response({"error": f"Unsupported correlation method: {method}"}, status=400)
+
+            # Only consider numeric columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if len(numeric_cols) < 2:
+                return Response({"error": "Not enough numeric columns to check."}, status=400)
+
+            # Compute correlation matrix
+            corr_matrix = df[numeric_cols].corr(method=method)
+            corr_matrix = corr_matrix.fillna(0)  # Avoid NaNs in correlations
+
+            # Only consider upper triangle to avoid duplicate pairs
+            upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+            to_remove = set()
+            for col in upper_tri.columns:
+                for row in upper_tri.index:
+                    corr_val = upper_tri.loc[row, col]
+                    if abs(corr_val) > float(threshold):
+                        if prefer == "first":
+                            to_remove.add(row)
+                        elif prefer == "last":
+                            to_remove.add(col)
+
+            # Drop selected columns
+            reduced_df = df.drop(columns=list(to_remove), errors='ignore')
+
+            # Prepare new filtered data
+            sub_df_json = reduced_df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            # Save to CSV and run R script
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                reduced_df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse R output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class DeleteColumnsView(APIView):
+    def post(self, request):
+        summary_data = request.data.get("summaryData")
+        delete_columns = request.data.get("columns")
+
+        if not summary_data or not delete_columns:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            df.drop(columns=delete_columns, inplace=True, errors='ignore')
+
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)

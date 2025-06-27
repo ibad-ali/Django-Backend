@@ -7,7 +7,7 @@ suppressPackageStartupMessages({
 
 get_dataset_summary <- function(file_path, sheet = 1, max_unique_cat = 10) {
   if (grepl("\\.csv$", file_path, ignore.case = TRUE)) {
-    data <- read.csv(file_path, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+    data <- read.csv(file_path, stringsAsFactors = FALSE, na.strings = c("", "NA"), check.names = FALSE)
   } else if (grepl("\\.xlsx$", file_path, ignore.case = TRUE) || grepl("\\.xls$", file_path, ignore.case = TRUE)) {
     data <- read_excel(file_path, sheet = sheet)
   } else {
