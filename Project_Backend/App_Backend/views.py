@@ -562,7 +562,7 @@ class NormalizeDataView(APIView):
                 normalized_output_path = temp_output.name
 
             # R Script call for normalization
-            r_script_path = "R Functions/Transformation/normalize_column.R"
+            r_script_path = "R Functions/Transformation/normalization.R"
             cmd = [
                 "Rscript",
                 r_script_path,
@@ -833,65 +833,33 @@ class VariableConstruction(APIView):
         preview_data = summary_data.get("filtered_data", [])
         df = pd.DataFrame(preview_data)
         
-        # Update filtered data
-        sub_df_json = df.to_dict(orient='list')
-        sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+        try:     
+            # Update filtered data
+            sub_df_json = df.to_dict(orient='list')
+            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
 
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
-            df.to_csv(temp_file.name, index=False)
-            temp_file_path = temp_file.name
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                df.to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
 
-        r_script_path = "R Functions/get_dataset_summary.R"
-        cmd = ["Rscript", r_script_path, temp_file_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+            r_script_path = "R Functions/get_dataset_summary.R"
+            cmd = ["Rscript", r_script_path, temp_file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.returncode != 0:
-            raise Exception(result.stderr)
+            if result.returncode != 0:
+                raise Exception(result.stderr)
 
-        # Parse JSON output
-        r_output = json.loads(result.stdout)
+            # Parse JSON output
+            r_output = json.loads(result.stdout)
+            
+            print(r_output)
 
-        return Response({
-            "summary": r_output.get("summary"),
-            "columns": r_output.get("columns"),
-            "frequency_data": r_output.get("frequency_data"),
-            "correlation_matrix": r_output.get("correlation_matrix"),
-            "filtered_data": sub_df_json
-        })
-        # print(result)
-        # df = pd.DataFrame(result)
-        
-        # # Update filtered data
-        # result = df.to_dict(orient='list')
-        # result = {k: [make_json_serializable_variable(v) for v in vals] for k, vals in result.items()}
-        
-        # if not result:
-        #     return Response({"error": "Missing required parameters"}, status=400)
-
-        # try:
-        #     # Save the skewed_data DataFrame to a new temporary CSV
-        #     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_skewed_file:
-        #         result = pd.DataFrame(result)
-        #         result.to_csv(temp_skewed_file.name, index=False)
-        #         skewed_csv_path = temp_skewed_file.name
-
-        #     # Call R script to generate summary based on skewed data
-        #     summary_r_script_path = "R Functions/get_dataset_summary.R"
-        #     summary_cmd = ["Rscript", summary_r_script_path, skewed_csv_path]
-        #     summary_result = subprocess.run(summary_cmd, capture_output=True, text=True)
-
-        #     if summary_result.returncode != 0:
-        #         raise Exception(f"R Script Error during summary calculation: {summary_result.stderr}")
-
-        #     r_output = json.loads(summary_result.stdout)
-
-        #     return Response({
-        #         "summary": r_output.get("summary"),
-        #         "columns": r_output.get("columns"),
-        #         "frequency_data": r_output.get("frequency_data"),
-        #         "correlation_matrix": r_output.get("correlation_matrix"),
-        #         "filtered_data": result
-        #     })
-
-        # except Exception as e:
-        #     return Response({"error": str(e)}, status=500)
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": sub_df_json
+            })
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
