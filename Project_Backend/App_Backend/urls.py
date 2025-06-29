@@ -17,6 +17,7 @@ urlpatterns = [
     path('aggregate/', AggregationView.as_view(), name = 'aggregate'),
     path('variable-construction/', VariableConstructionView.as_view(), name='variable-construction'),
     path('handle-discretize/', HandleDiscretizationView.as_view(), name='handle-discretize'),
+    path('handle-dimensionality-reduction/', DimensionalityReductionView.as_view(), name='handle-dimensionality-reduction'),
     path('handle-multicollinearity/', HandleMulticollinearityView.as_view(), name='handle-multicollinearity'),
     path('delete-columns/', DeleteColumnsView.as_view(), name='delete-columns'),
 ]

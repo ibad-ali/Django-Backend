@@ -161,7 +161,6 @@ class DatasetSummaryView(APIView):
 
             sub_df_json = sub_df.to_dict(orient='list')
             sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
-
             # Call the R script using subprocess
             r_script_path = "R Functions/get_dataset_summary.R"
             cmd = ["Rscript", r_script_path, tmp_path]
@@ -205,18 +204,30 @@ class HandleMissingValuesView(APIView):
                 return Response({"error": f"Column '{selected_column}' not found in data."}, status=400)
 
             if missing_method == "mean":
-                if pd.api.types.is_numeric_dtype(df[selected_column]):
-                    mean_val = df[selected_column].mean()
-                    df[selected_column].fillna(mean_val, inplace=True)
-                else:
-                    return Response({"error": "Mean imputation requires a numeric column."}, status=400)
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    try:
+                        df[selected_column] = pd.to_numeric(df[selected_column], errors="coerce")
+                    except Exception as e:
+                        return Response({"error": f"Failed to convert column '{selected_column}' to numeric: {str(e)}"}, status=400)
+
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    return Response({"error": f"Column '{selected_column}' cannot be converted to numeric for mean imputation."}, status=400)
+
+                mean_val = df[selected_column].mean()
+                df[selected_column].fillna(mean_val, inplace=True)
 
             elif missing_method == "median":
-                if pd.api.types.is_numeric_dtype(df[selected_column]):
-                    median_val = df[selected_column].median()
-                    df[selected_column].fillna(median_val, inplace=True)
-                else:
-                    return Response({"error": "Median imputation requires a numeric column."}, status=400)
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    try:
+                        df[selected_column] = pd.to_numeric(df[selected_column], errors="coerce")
+                    except Exception as e:
+                        return Response({"error": f"Failed to convert column '{selected_column}' to numeric: {str(e)}"}, status=400)
+
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    return Response({"error": f"Column '{selected_column}' cannot be converted to numeric for median imputation."}, status=400)
+
+                median_val = df[selected_column].median()
+                df[selected_column].fillna(median_val, inplace=True)
 
             elif missing_method == "mode":
                 mode_series = df[selected_column].mode()
@@ -233,6 +244,13 @@ class HandleMissingValuesView(APIView):
                 df.drop(columns=[selected_column], inplace=True)
 
             elif missing_method == "regression":
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    try:
+                        df[selected_column] = pd.to_numeric(df[selected_column], errors="coerce")
+                    except Exception as e:
+                        return Response({"error": f"Failed to convert '{selected_column}' to numeric: {str(e)}"},
+                                        status=400)
+
                 if not pd.api.types.is_numeric_dtype(df[selected_column]):
                     return Response({"error": "Regression imputation requires a numeric column."}, status=400)
 
@@ -252,33 +270,39 @@ class HandleMissingValuesView(APIView):
                 if len(train_df) < 2:
                     return Response({"error": "Not enough non-missing values to perform regression."}, status=400)
 
-                # Handle NaN in feature columns - option 1: drop rows with NaN in features
+                # Handle NaN in feature columns
                 train_df = train_df.dropna(subset=numeric_cols)
                 if len(train_df) < 2:
                     return Response({
                                         "error": "Not enough complete cases to perform regression after dropping rows with missing features."},
                                     status=400)
 
-                # Train linear regression model
                 from sklearn.linear_model import LinearRegression
                 from sklearn.impute import SimpleImputer
                 from sklearn.pipeline import make_pipeline
 
-                # Create pipeline with imputer and model
                 model = make_pipeline(
-                    SimpleImputer(strategy='mean'),  # Impute missing features with mean
+                    SimpleImputer(strategy='mean'),
                     LinearRegression()
                 )
 
                 model.fit(train_df[numeric_cols], train_df[selected_column])
 
-                # Predict missing values (only for rows where features aren't all NaN)
+                # Predict for rows with sufficient features
                 predict_df = predict_df.dropna(subset=numeric_cols)
                 if not predict_df.empty:
                     predicted_values = model.predict(predict_df[numeric_cols])
                     df.loc[predict_df.index, selected_column] = predicted_values
 
             elif missing_method == "decision_tree":
+                # Try converting to numeric if not already
+                if not pd.api.types.is_numeric_dtype(df[selected_column]):
+                    try:
+                        df[selected_column] = pd.to_numeric(df[selected_column], errors="coerce")
+                    except Exception as e:
+                        return Response({"error": f"Failed to convert '{selected_column}' to numeric: {str(e)}"},
+                                        status=400)
+
                 if not pd.api.types.is_numeric_dtype(df[selected_column]):
                     return Response({"error": "Decision tree imputation requires a numeric column."}, status=400)
 
@@ -300,19 +324,18 @@ class HandleMissingValuesView(APIView):
                     return Response({"error": "Not enough non-missing values to perform decision tree imputation."},
                                     status=400)
 
-                # Handle NaN in feature columns - option 2: use HistGradientBoostingRegressor which handles NaN natively
-                from sklearn.ensemble import HistGradientBoostingRegressor
-
                 # Drop rows where all features are NaN
                 train_df = train_df.dropna(subset=numeric_cols, how='all')
                 if len(train_df) < 2:
                     return Response({"error": "Not enough complete cases to perform decision tree imputation."},
                                     status=400)
 
+                from sklearn.ensemble import HistGradientBoostingRegressor
+
                 model = HistGradientBoostingRegressor(random_state=42)
                 model.fit(train_df[numeric_cols], train_df[selected_column])
 
-                # Predict missing values (only for rows that have at least some features)
+                # Predict for rows with at least partial features
                 predict_df = predict_df.dropna(subset=numeric_cols, how='all')
                 if not predict_df.empty:
                     predicted_values = model.predict(predict_df[numeric_cols])
@@ -608,50 +631,79 @@ class RemoveDuplicatedView(APIView):
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
+
 class HandleInconsistenciesView(APIView):
     def post(self, request):
-        inconsistencies_checks = request.data.get("inconsistencies")
+        inconsistency_type = request.data.get("type")
+        selected_columns = request.data.get("columns", [])
+        typecast_column = request.data.get("typecast_column")
+        target_type = request.data.get("target_type")
         summary_data = request.data.get("summaryData")
 
-        if not summary_data or not inconsistencies_checks:
+        if not inconsistency_type or not summary_data:
             return Response({"error": "Missing required parameters"}, status=400)
-
 
         try:
             preview_data = summary_data.get("filtered_data", [])
             df = pd.DataFrame(preview_data)
 
-            # Apply inconsistency handling
-            if inconsistencies_checks.get('strip'):
-                df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+            if inconsistency_type in ["lowercase", "uppercase", "titlecase", "trim"]:
+                for col in selected_columns:
+                    if inconsistency_type == "lowercase":
+                        df[col] = df[col].astype(str).str.lower()
+                    elif inconsistency_type == "uppercase":
+                        df[col] = df[col].astype(str).str.upper()
+                    elif inconsistency_type == "titlecase":
+                        df[col] = df[col].astype(str).str.title()
+                    elif inconsistency_type == "trim":
+                        df[col] = df[col].astype(str).str.strip()
 
-            if inconsistencies_checks.get('case'):
-                df = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+            elif inconsistency_type == "typecast" and typecast_column and target_type:
+                try:
+                    if target_type == "numeric":
+                        df[typecast_column] = pd.to_numeric(df[typecast_column], errors="coerce")
+                    elif target_type == "integer":
+                        df[typecast_column] = pd.to_numeric(df[typecast_column], errors="coerce").astype("Int64")
+                    elif target_type == "character" or target_type == "string":
+                        df[typecast_column] = df[typecast_column].astype(str)
+                    elif target_type == "factor":
+                        df[typecast_column] = df[typecast_column].astype("category")
+                    elif target_type == "logical":
+                        df[typecast_column] = df[typecast_column].astype(bool)
+                    elif target_type == "date":
+                        df[typecast_column] = pd.to_datetime(df[typecast_column], errors="coerce")
+                except Exception as e:
+                    return Response({"error": f"Typecasting failed: {str(e)}"}, status=400)
 
-            # Update filtered data
-            sub_df_json = df.to_dict(orient='list')
-            sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+            elif inconsistency_type == "changeDateFormat" and typecast_column and target_type:
+                try:
+                    df[typecast_column] = pd.to_datetime(df[typecast_column], errors="coerce")
+                    df[typecast_column] = df[typecast_column].dt.strftime(target_type)
+                except Exception as e:
+                    return Response({"error": f"Date format conversion failed: {str(e)}"}, status=400)
 
+            # Save temp CSV for R processing
             with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
                 df.to_csv(temp_file.name, index=False)
                 temp_file_path = temp_file.name
 
-            r_script_path = "R Functions/get_dataset_summary.R"
-            cmd = ["Rscript", r_script_path, temp_file_path]
+            cmd = ["Rscript", "R Functions/get_dataset_summary.R", temp_file_path]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
                 raise Exception(result.stderr)
 
-            # Parse JSON output
             r_output = json.loads(result.stdout)
+
+            filtered_json = df.to_dict(orient='list')
+            filtered_json = {k: [make_json_serializable(v) for v in vals] for k, vals in filtered_json.items()}
 
             return Response({
                 "summary": r_output.get("summary"),
                 "columns": r_output.get("columns"),
                 "frequency_data": r_output.get("frequency_data"),
                 "correlation_matrix": r_output.get("correlation_matrix"),
-                "filtered_data": sub_df_json
+                "filtered_data": filtered_json
             })
 
         except Exception as e:
@@ -1086,6 +1138,76 @@ class HandleDiscretizationView(APIView):
                 "frequency_data": r_output.get("frequency_data"),
                 "correlation_matrix": r_output.get("correlation_matrix"),
                 "filtered_data": discretized_data
+            })
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class DimensionalityReductionView(APIView):
+    def post(self, request):
+        method = request.data.get("method")
+        threshold = request.data.get("threshold", 0.9)
+        summary_data = request.data.get("summaryData")
+        target = request.data.get("target")
+        greedy_mode = request.data.get("greedy_mode", None)
+
+        if not method or summary_data is None:
+            return Response({"error": "Missing required parameters"}, status=400)
+
+        try:
+            preview_data = summary_data.get("filtered_data", [])
+            df = pd.DataFrame(preview_data)
+
+            # Save input CSV
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_input:
+                df.to_csv(temp_input.name, index=False)
+                input_path = temp_input.name
+
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temp_output:
+                output_path = temp_output.name
+
+            r_script_path = "R Functions/Reduction/dimensionality_reduction.R"
+
+            # Prepare command
+            cmd = [
+                "Rscript",
+                r_script_path,
+                input_path,
+                method,
+                str(threshold),
+                target if target else "",
+                greedy_mode if greedy_mode else "",
+                output_path
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                error_message = result.stderr  # This will capture the error output from R
+                return Response({"error": error_message}, status=400)
+
+            with open(output_path, "r") as f:
+                reduced_data = json.load(f)
+
+            # Summarize the reduced data
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp_file:
+                pd.DataFrame(reduced_data).to_csv(temp_file.name, index=False)
+                temp_file_path = temp_file.name
+
+            summary_script = os.path.join("R Functions", "get_dataset_summary.R")
+            summary_result = subprocess.run(["Rscript", summary_script, temp_file_path], capture_output=True, text=True)
+
+            if summary_result.returncode != 0:
+                raise Exception(summary_result.stderr)
+
+            r_output = json.loads(summary_result.stdout)
+
+            return Response({
+                "summary": r_output.get("summary"),
+                "columns": r_output.get("columns"),
+                "frequency_data": r_output.get("frequency_data"),
+                "correlation_matrix": r_output.get("correlation_matrix"),
+                "filtered_data": reduced_data
             })
 
         except Exception as e:

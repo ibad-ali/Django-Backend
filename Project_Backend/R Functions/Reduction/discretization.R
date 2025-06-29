@@ -70,7 +70,7 @@ discretize_column <- function(data, column, method = "equalwidth", bins = 4, tar
       data[[new_col]] <- disc_df[[column]]
     }
     
-    data[[new_col]] <- as.factor(data[[new_col]])
+    data[[new_col]] <- as.numeric(data[[new_col]])
     return(data)
     
   }, error = function(e) {
