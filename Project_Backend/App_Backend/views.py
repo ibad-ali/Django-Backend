@@ -13,6 +13,8 @@ import math
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from sklearn.linear_model import LinearRegression
 from scipy.stats import zscore
+from pathlib import Path
+
 
 def parse_column_list(value):
     if not value:
@@ -117,7 +119,7 @@ class DatasetSummaryView(APIView):
             tmp_path = tmp.name
 
         try:
-            # Load file and filter columns
+            # Load the file
             if file_ext == '.csv':
                 df = pd.read_csv(tmp_path)
             else:
@@ -127,15 +129,37 @@ class DatasetSummaryView(APIView):
             if not selected_columns:
                 return Response({"error": "Please select at least one qualitative or quantitative column."}, status=400)
 
-            # sub_df = df[selected_columns].copy()
+            # Filter only selected columns
+            sub_df = df[selected_columns].copy()
+
+            # Type cast based on user selection
+            for col in qualitative:
+                if col in sub_df.columns:
+                    sub_df[col] = sub_df[col].astype(str)
+
+            for col in quantitative:
+                if col in sub_df.columns:
+                    # Convert to numeric, coerce errors to NaN
+                    sub_df[col] = pd.to_numeric(sub_df[col], errors='coerce')
 
             # Clean the data
-            for col in df.columns:
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    df[col] = df[col].replace([np.inf, -np.inf], np.nan)
-                df[col] = df[col].apply(lambda x: None if isinstance(x, str) and x.lower() in ['null', 'nan', 'inf', '-inf'] else x)
+            for col in sub_df.columns:
+                if pd.api.types.is_numeric_dtype(sub_df[col]):
+                    sub_df[col] = sub_df[col].replace([np.inf, -np.inf], np.nan)
+                sub_df[col] = sub_df[col].apply(
+                    lambda x: None if isinstance(x, str) and x.lower() in ['null', 'nan', 'inf', '-inf'] else x
+                )
 
-            sub_df_json = df.to_dict(orient='list')
+            if file_ext == '.csv':
+                sub_df.to_csv(tmp_path, index=False)
+            elif file_ext in ['.xlsx', '.xls']:
+                tmp_path = Path(tmp_path)
+                tmp_path = tmp_path.with_suffix('.xlsx')
+                sub_df.to_excel(tmp_path, index=False, engine='openpyxl')
+            else:
+                raise ValueError(f"Unsupported file extension: {file_ext}")
+
+            sub_df_json = sub_df.to_dict(orient='list')
             sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
 
             # Call the R script using subprocess
@@ -635,7 +659,7 @@ class HandleInconsistenciesView(APIView):
 
 class DownloadOutputView(APIView):
     def post(self, request):
-        summary_data = request.data.get("summaryData")
+        summary_data = request.data.get("summaryDataUpdated")
 
         if not summary_data:
             return Response({"error": "Missing required parameters"}, status=400)
