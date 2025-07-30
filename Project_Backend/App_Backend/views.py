@@ -53,6 +53,7 @@ class UploadFileView(APIView):
 
     def post(self, request):
         file_obj = request.FILES.get("file")
+        has_headers = request.POST.get("has_headers", "true").lower() == "true"
 
         if not file_obj:
             return Response({"error": "No file uploaded"}, status=400)
@@ -75,7 +76,7 @@ class UploadFileView(APIView):
 
             # Call R script using subprocess
             result = subprocess.run(
-                ["Rscript", "--vanilla", r_script_path, tmp_path],
+                ["Rscript", "--vanilla", r_script_path, tmp_path, str(has_headers)],
                 capture_output=True,
                 text=True
             )
@@ -105,6 +106,7 @@ class DatasetSummaryView(APIView):
         file_obj = request.FILES.get("file")
         qualitative = parse_column_list(request.data.get("qualitative_columns", []))
         quantitative = parse_column_list(request.data.get("quantitative_columns", []))
+        has_headers = request.data.get("has_headers", "true").lower() == "true"
 
         if not file_obj:
             return Response({"error": "No file uploaded"}, status=400)
@@ -119,11 +121,16 @@ class DatasetSummaryView(APIView):
             tmp_path = tmp.name
 
         try:
-            # Load the file
+            # Load the file with or without headers
             if file_ext == '.csv':
-                df = pd.read_csv(tmp_path)
+                df = pd.read_csv(tmp_path, header=0 if has_headers else None)
             else:
-                df = pd.read_excel(tmp_path)
+                df = pd.read_excel(tmp_path, header=0 if has_headers else None)
+
+
+            # If no headers, generate column names as numbers
+            if not has_headers:
+                df.columns = [str(i + 1) for i in range(len(df.columns))]
 
             selected_columns = qualitative + quantitative
             if not selected_columns:
@@ -161,9 +168,10 @@ class DatasetSummaryView(APIView):
 
             sub_df_json = sub_df.to_dict(orient='list')
             sub_df_json = {k: [make_json_serializable(v) for v in vals] for k, vals in sub_df_json.items()}
+
             # Call the R script using subprocess
             r_script_path = "R Functions/get_dataset_summary.R"
-            cmd = ["Rscript", r_script_path, tmp_path]
+            cmd = ["Rscript", r_script_path, tmp_path, str(has_headers).upper()]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -185,7 +193,6 @@ class DatasetSummaryView(APIView):
             return Response({"error": str(e)}, status=500)
         finally:
             os.remove(tmp_path)
-
 
 class HandleMissingValuesView(APIView):
     def post(self, request):

@@ -1,12 +1,24 @@
 library(readxl)
 library(jsonlite)
 
-classify_columns_advanced <- function(file_path, sheet = 1, max_unique_cat = 10) {
+classify_columns_advanced <- function(file_path, sheet = 1, max_unique_cat = 10, has_headers = TRUE) {
   # Read file based on extension
   if (grepl("\\.csv$", file_path, ignore.case = TRUE)) {
-    data <- read.csv(file_path, stringsAsFactors = FALSE, check.names = FALSE)  # Keeps original column names
+    if (has_headers) {
+      data <- read.csv(file_path, stringsAsFactors = FALSE, check.names = FALSE)
+    } else {
+      data <- read.csv(file_path, stringsAsFactors = FALSE, check.names = FALSE, header = FALSE)
+      # Generate column names as numbers
+      names(data) <- as.character(1:ncol(data))
+    }
   } else if (grepl("\\.xlsx$", file_path, ignore.case = TRUE) || grepl("\\.xls$", file_path, ignore.case = TRUE)) {
-    data <- readxl::read_excel(file_path, sheet = sheet, .name_repair = "none")  # Prevents name modification
+    if (has_headers) {
+      data <- readxl::read_excel(file_path, sheet = sheet, .name_repair = "none")
+    } else {
+      data <- readxl::read_excel(file_path, sheet = sheet, col_names = FALSE)
+      # Generate column names as numbers
+      names(data) <- as.character(1:ncol(data))
+    }
   } else {
     stop("Unsupported file type. Only .csv, .xlsx, and .xls are supported.")
   }
@@ -50,7 +62,9 @@ classify_columns_advanced <- function(file_path, sheet = 1, max_unique_cat = 10)
 # Main execution when called from command line
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) > 0) {
-  result <- classify_columns_advanced(args[1])
+  file_path <- args[1]
+  has_headers <- if (length(args) > 1) as.logical(args[2]) else TRUE
+  result <- classify_columns_advanced(file_path, has_headers = has_headers)
   # Convert to JSON and print (this will be captured by Python)
   cat(jsonlite::toJSON(result, auto_unbox = TRUE))
 }
